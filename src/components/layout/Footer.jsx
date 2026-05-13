@@ -25,7 +25,7 @@ export default function Footer() {
           </p>
           <div className="flex items-center gap-3">
             <a
-              href="https://instagram.com"
+              href="https://www.instagram.com/brag.the.bag?igsh=dTVudjR4a2I5aGRh"
               target="_blank"
               rel="noreferrer"
               className="w-9 h-9 rounded-full border border-cream/20 flex items-center justify-center hover:border-cream transition-colors"
