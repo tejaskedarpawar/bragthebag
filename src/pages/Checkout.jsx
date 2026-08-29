@@ -1,12 +1,13 @@
-import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { CheckCircle2, Loader2, Phone } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
+import { CheckCircle2, Loader2, Phone, XCircle, Clock, AlertTriangle, ShieldCheck } from 'lucide-react';
 import { useCartStore } from '../store/useCartStore';
 
 export default function Checkout() {
   const items = useCartStore((s) => s.items);
   const clearCart = useCartStore((s) => s.clearCart);
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
 
   const subtotal = items.reduce((sum, i) => sum + i.price * (i.quantity || 1), 0);
   const shipping = subtotal > 2999 ? 0 : 149;
@@ -15,11 +16,16 @@ export default function Checkout() {
   const [form, setForm] = useState({
     firstName: '', lastName: '', email: '', phone: '', address: '', city: '', state: '', pincode: '',
   });
-  const [otpState, setOtpState] = useState('idle'); // idle | loading | verified
+  const [otpState, setOtpState] = useState('idle'); // idle | loading | sent | verifying | verified
   const [otpValue, setOtpValue] = useState('');
   const [showOtpInput, setShowOtpInput] = useState(false);
-  const [submitted, setSubmitted] = useState(false);
   const [errors, setErrors] = useState({});
+
+  // Payment states
+  const [paymentState, setPaymentState] = useState('idle');
+  // idle | creating | processing | verifying | success | failed | cancelled | pending
+  const [paymentError, setPaymentError] = useState('');
+  const [orderResult, setOrderResult] = useState(null);
 
   function update(field, val) {
     setForm((f) => ({ ...f, [field]: val }));
@@ -33,7 +39,10 @@ export default function Checkout() {
     }
     setShowOtpInput(true);
     setOtpState('loading');
-    setTimeout(() => setOtpState('sent'), 1500);
+    setTimeout(() => {
+      setOtpState('sent');
+      setOtpValue('123456');
+    }, 1500);
   }
 
   function verifyOtp() {
@@ -55,22 +64,169 @@ export default function Checkout() {
     return e;
   }
 
-  function handleSubmit(e) {
-    e.preventDefault();
-    const errs = validate();
-    if (Object.keys(errs).length > 0) { setErrors(errs); return; }
-    setSubmitted(true);
-    clearCart();
+  // ─── Verify payment on return from Cashfree ───────────────────────
+  useEffect(() => {
+    const returnOrderId = searchParams.get('order_id');
+    if (returnOrderId && paymentState === 'idle') {
+      // Restore form data saved before the Cashfree redirect
+      const savedForm = sessionStorage.getItem('btb_checkout_form');
+      if (savedForm) {
+        try { setForm(JSON.parse(savedForm)); } catch {}
+      }
+      verifyPayment(returnOrderId);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
+
+  async function verifyPayment(orderId) {
+    setPaymentState('verifying');
+    try {
+      const res = await fetch('/api/payment/cashfree/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ order_id: orderId }),
+      });
+      const data = await res.json();
+
+      if (!res.ok) {
+        setPaymentState('failed');
+        setPaymentError(data.error || 'Payment verification failed');
+        return;
+      }
+
+      setOrderResult({
+        orderId,
+        amount: data.order_amount,
+        status: data.status,
+        cf_order_id: data.cf_order_id,
+      });
+
+      switch (data.status) {
+        case 'PAID':
+          setPaymentState('success');
+          clearCart();
+          break;
+        case 'CANCELLED':
+          setPaymentState('cancelled');
+          break;
+        case 'PENDING':
+          setPaymentState('pending');
+          break;
+        default:
+          setPaymentState('failed');
+          setPaymentError('Payment was not completed');
+      }
+    } catch (err) {
+      console.error('Verify error:', err);
+      setPaymentState('failed');
+      setPaymentError('Unable to verify payment. Please contact support.');
+    }
   }
 
-  if (submitted) {
+  // ─── Handle Pay Now ───────────────────────────────────────────────
+  async function handleSubmit(e) {
+    e.preventDefault();
+    if (paymentState === 'creating' || paymentState === 'processing' || paymentState === 'verifying') {
+      return; // Prevent duplicate order creation on rapid clicks
+    }
+    const errs = validate();
+    if (Object.keys(errs).length > 0) { setErrors(errs); return; }
+
+    setPaymentState('creating');
+    setPaymentError('');
+
+    try {
+      // Step 1: Create order on backend
+      const createRes = await fetch('/api/payment/cashfree/create-order', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          items: items.map((i) => ({
+            id: i.id,
+            name: i.name,
+            price: i.price,
+            quantity: i.quantity || 1,
+            customization: i.customization || null,
+          })),
+          customer: {
+            name: `${form.firstName} ${form.lastName}`,
+            email: form.email,
+            phone: form.phone,
+          },
+        }),
+      });
+
+      const createData = await createRes.json();
+
+      if (!createRes.ok) {
+        setPaymentState('failed');
+        setPaymentError(createData.error || 'Failed to create payment order');
+        return;
+      }
+
+      // Step 2: Save form data to sessionStorage so we can display it after redirect
+      sessionStorage.setItem('btb_checkout_form', JSON.stringify(form));
+      sessionStorage.setItem('btb_checkout_order_id', createData.order_id);
+
+      // Step 3: Initialize Cashfree SDK and redirect to hosted checkout
+      setPaymentState('processing');
+
+      const cashfree = window.Cashfree({ mode: 'sandbox' });
+
+      // Using '_self' redirect mode — Cashfree redirects to their hosted page,
+      // then back to our return_url with order_id. This is more reliable than
+      // '_modal' which can fail in sandbox due to iframe restrictions.
+      cashfree.checkout({
+        paymentSessionId: createData.payment_session_id,
+        redirectTarget: '_self',
+      });
+
+      // The page will redirect — code below this won't execute
+
+    } catch (err) {
+      console.error('Payment error:', err);
+      setPaymentState('failed');
+      setPaymentError('An unexpected error occurred. Please try again.');
+    }
+  }
+
+  // ─── Payment Result Screens ───────────────────────────────────────
+
+  // SUCCESS
+  if (paymentState === 'success') {
     return (
       <main className="max-w-xl mx-auto px-4 py-32 text-center">
-        <CheckCircle2 size={64} className="mx-auto text-green-500 mb-6" />
-        <h1 className="font-serif text-4xl text-charcoal mb-4">Order Placed!</h1>
-        <p className="text-charcoal/60 mb-8">
-          Thank you, {form.firstName}! Your handcrafted bag is now in the queue. We'll send updates to <strong>{form.email}</strong>.
+        <div className="bg-green-50 w-20 h-20 rounded-full flex items-center justify-center mx-auto mb-6">
+          <CheckCircle2 size={48} className="text-green-500" />
+        </div>
+        <h1 className="font-serif text-4xl text-charcoal mb-4">Payment Successful!</h1>
+        <p className="text-charcoal/60 mb-6">
+          Thank you, {form.firstName || 'Customer'}! Your handcrafted bag is now in the queue.
         </p>
+        {orderResult && (
+          <div className="bg-white rounded-2xl border border-black/5 shadow-sm p-6 text-left mb-8 space-y-3">
+            <div className="flex justify-between text-sm">
+              <span className="text-charcoal/60">Order ID</span>
+              <span className="font-mono font-medium text-charcoal">{orderResult.orderId}</span>
+            </div>
+            <div className="flex justify-between text-sm">
+              <span className="text-charcoal/60">Amount Paid</span>
+              <span className="font-serif font-semibold text-forest">₹{orderResult.amount?.toLocaleString('en-IN')}</span>
+            </div>
+            <div className="flex justify-between text-sm">
+              <span className="text-charcoal/60">Payment Status</span>
+              <span className="inline-flex items-center gap-1 text-green-700 font-semibold">
+                <ShieldCheck size={14} /> Verified & Paid
+              </span>
+            </div>
+            {form.email && (
+              <div className="flex justify-between text-sm">
+                <span className="text-charcoal/60">Confirmation sent to</span>
+                <span className="font-medium text-charcoal">{form.email}</span>
+              </div>
+            )}
+          </div>
+        )}
         <button
           onClick={() => navigate('/')}
           className="bg-forest text-cream font-semibold px-8 py-4 rounded-full hover:bg-charcoal transition-colors"
@@ -80,6 +236,111 @@ export default function Checkout() {
       </main>
     );
   }
+
+  // FAILED
+  if (paymentState === 'failed') {
+    return (
+      <main className="max-w-xl mx-auto px-4 py-32 text-center">
+        <div className="bg-red-50 w-20 h-20 rounded-full flex items-center justify-center mx-auto mb-6">
+          <XCircle size={48} className="text-red-500" />
+        </div>
+        <h1 className="font-serif text-4xl text-charcoal mb-4">Payment Failed</h1>
+        <p className="text-charcoal/60 mb-8">
+          {paymentError || 'Payment failed. Please try again.'}
+        </p>
+        <div className="flex flex-col sm:flex-row gap-3 justify-center">
+          <button
+            onClick={() => { setPaymentState('idle'); setPaymentError(''); }}
+            className="bg-forest text-cream font-semibold px-8 py-4 rounded-full hover:bg-charcoal transition-colors"
+          >
+            Try Again
+          </button>
+          <button
+            onClick={() => navigate('/cart')}
+            className="border border-charcoal/20 text-charcoal font-semibold px-8 py-4 rounded-full hover:bg-charcoal/5 transition-colors"
+          >
+            Back to Cart
+          </button>
+        </div>
+      </main>
+    );
+  }
+
+  // CANCELLED
+  if (paymentState === 'cancelled') {
+    return (
+      <main className="max-w-xl mx-auto px-4 py-32 text-center">
+        <div className="bg-amber-50 w-20 h-20 rounded-full flex items-center justify-center mx-auto mb-6">
+          <AlertTriangle size={48} className="text-amber-500" />
+        </div>
+        <h1 className="font-serif text-4xl text-charcoal mb-4">Payment Cancelled</h1>
+        <p className="text-charcoal/60 mb-8">
+          Payment was cancelled. Your cart items are still saved.
+        </p>
+        <div className="flex flex-col sm:flex-row gap-3 justify-center">
+          <button
+            onClick={() => { setPaymentState('idle'); setPaymentError(''); }}
+            className="bg-forest text-cream font-semibold px-8 py-4 rounded-full hover:bg-charcoal transition-colors"
+          >
+            Try Again
+          </button>
+          <button
+            onClick={() => navigate('/cart')}
+            className="border border-charcoal/20 text-charcoal font-semibold px-8 py-4 rounded-full hover:bg-charcoal/5 transition-colors"
+          >
+            Back to Cart
+          </button>
+        </div>
+      </main>
+    );
+  }
+
+  // PENDING
+  if (paymentState === 'pending') {
+    return (
+      <main className="max-w-xl mx-auto px-4 py-32 text-center">
+        <div className="bg-blue-50 w-20 h-20 rounded-full flex items-center justify-center mx-auto mb-6">
+          <Clock size={48} className="text-blue-500" />
+        </div>
+        <h1 className="font-serif text-4xl text-charcoal mb-4">Payment Pending</h1>
+        <p className="text-charcoal/60 mb-4">
+          Payment is pending. We are verifying your payment.
+        </p>
+        {orderResult && (
+          <p className="text-sm text-charcoal/40 mb-8 font-mono">Order ID: {orderResult.orderId}</p>
+        )}
+        <div className="flex flex-col sm:flex-row gap-3 justify-center">
+          <button
+            onClick={() => orderResult && verifyPayment(orderResult.orderId)}
+            className="bg-forest text-cream font-semibold px-8 py-4 rounded-full hover:bg-charcoal transition-colors inline-flex items-center gap-2"
+          >
+            <Loader2 size={16} className={paymentState === 'verifying' ? 'animate-spin' : ''} />
+            Check Status
+          </button>
+          <button
+            onClick={() => navigate('/')}
+            className="border border-charcoal/20 text-charcoal font-semibold px-8 py-4 rounded-full hover:bg-charcoal/5 transition-colors"
+          >
+            Back to Home
+          </button>
+        </div>
+      </main>
+    );
+  }
+
+  // VERIFYING (spinner screen while checking with Cashfree)
+  if (paymentState === 'verifying') {
+    return (
+      <main className="max-w-xl mx-auto px-4 py-32 text-center">
+        <Loader2 size={48} className="mx-auto text-forest mb-6 animate-spin" />
+        <h1 className="font-serif text-3xl text-charcoal mb-4">Verifying Payment…</h1>
+        <p className="text-charcoal/60">Please wait while we confirm your payment with Cashfree.</p>
+      </main>
+    );
+  }
+
+  // ─── Main Checkout Form ───────────────────────────────────────────
+  const isPaymentInProgress = paymentState === 'creating' || paymentState === 'processing';
 
   return (
     <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-16">
@@ -94,13 +355,13 @@ export default function Checkout() {
             <h2 className="font-serif text-xl text-charcoal mb-5">Contact Information</h2>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <Field label="First Name" error={errors.firstName}>
-                <input value={form.firstName} onChange={(e) => update('firstName', e.target.value)} className={inp(errors.firstName)} placeholder="Riya" />
+                <input value={form.firstName} onChange={(e) => update('firstName', e.target.value)} className={inp(errors.firstName)} placeholder="Riya" disabled={isPaymentInProgress} />
               </Field>
               <Field label="Last Name" error={errors.lastName}>
-                <input value={form.lastName} onChange={(e) => update('lastName', e.target.value)} className={inp(errors.lastName)} placeholder="Sharma" />
+                <input value={form.lastName} onChange={(e) => update('lastName', e.target.value)} className={inp(errors.lastName)} placeholder="Sharma" disabled={isPaymentInProgress} />
               </Field>
               <Field label="Email" error={errors.email} className="sm:col-span-2">
-                <input type="email" value={form.email} onChange={(e) => update('email', e.target.value)} className={inp(errors.email)} placeholder="riya@example.com" />
+                <input type="email" value={form.email} onChange={(e) => update('email', e.target.value)} className={inp(errors.email)} placeholder="riya@example.com" disabled={isPaymentInProgress} />
               </Field>
             </div>
 
@@ -117,11 +378,12 @@ export default function Checkout() {
                   onChange={(e) => update('phone', e.target.value.replace(/\D/g, ''))}
                   className={`${inp(errors.phone)} flex-1`}
                   placeholder="98765 43210"
+                  disabled={isPaymentInProgress}
                 />
                 <button
                   type="button"
                   onClick={sendOtp}
-                  disabled={otpState === 'verified'}
+                  disabled={otpState === 'verified' || isPaymentInProgress}
                   className={`px-4 py-2.5 rounded-xl text-xs font-semibold tracking-wider uppercase whitespace-nowrap transition-all ${
                     otpState === 'verified'
                       ? 'bg-green-100 text-green-700 cursor-default'
@@ -135,25 +397,39 @@ export default function Checkout() {
 
               {/* OTP Input */}
               {showOtpInput && otpState !== 'verified' && (
-                <div className="mt-3 flex gap-2 items-center">
-                  <input
-                    type="text"
-                    maxLength={6}
-                    value={otpValue}
-                    onChange={(e) => setOtpValue(e.target.value.replace(/\D/g, ''))}
-                    className={`${inp()} flex-1`}
-                    placeholder={otpState === 'loading' ? 'Sending OTP…' : 'Enter 6-digit OTP'}
-                    disabled={otpState === 'loading'}
-                  />
-                  <button
-                    type="button"
-                    onClick={verifyOtp}
-                    disabled={otpValue.length < 4 || otpState === 'verifying'}
-                    className="px-4 py-2.5 rounded-xl text-xs font-semibold tracking-wider uppercase bg-blush text-white hover:bg-blush/90 disabled:opacity-50 transition-all flex items-center gap-1.5"
-                  >
-                    {otpState === 'verifying' ? <Loader2 size={14} className="animate-spin" /> : <Phone size={14} />}
-                    Verify
-                  </button>
+                <div className="mt-3 space-y-2">
+                  <div className="flex gap-2 items-center">
+                    <input
+                      type="text"
+                      maxLength={6}
+                      value={otpValue}
+                      onChange={(e) => setOtpValue(e.target.value.replace(/\D/g, ''))}
+                      className={`${inp()} flex-1`}
+                      placeholder={otpState === 'loading' ? 'Sending OTP…' : 'Enter 6-digit OTP (e.g. 123456)'}
+                      disabled={otpState === 'loading' || isPaymentInProgress}
+                    />
+                    <button
+                      type="button"
+                      onClick={verifyOtp}
+                      disabled={otpValue.length < 4 || otpState === 'verifying' || isPaymentInProgress}
+                      className="px-4 py-2.5 rounded-xl text-xs font-semibold tracking-wider uppercase bg-blush text-white hover:bg-blush/90 disabled:opacity-50 transition-all flex items-center gap-1.5"
+                    >
+                      {otpState === 'verifying' ? <Loader2 size={14} className="animate-spin" /> : <Phone size={14} />}
+                      Verify
+                    </button>
+                  </div>
+                  {otpState === 'sent' && (
+                    <div className="flex items-center justify-between bg-amber-50 border border-amber-200 text-amber-800 text-xs px-3 py-2 rounded-xl">
+                      <span>📲 <strong>Demo Mode:</strong> Your OTP is <code className="bg-amber-100 px-1 py-0.5 rounded font-mono font-bold text-amber-900">123456</code> (or any 4-6 digit code)</span>
+                      <button
+                        type="button"
+                        onClick={() => setOtpValue('123456')}
+                        className="text-forest font-semibold hover:underline ml-2 underline"
+                      >
+                        Auto-fill
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
               {errors.otp && <p className="text-xs text-red-500 mt-1">{errors.otp}</p>}
@@ -165,26 +441,48 @@ export default function Checkout() {
             <h2 className="font-serif text-xl text-charcoal mb-5">Shipping Address</h2>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <Field label="Street Address" error={errors.address} className="sm:col-span-2">
-                <input value={form.address} onChange={(e) => update('address', e.target.value)} className={inp(errors.address)} placeholder="123, Gandhi Nagar" />
+                <input value={form.address} onChange={(e) => update('address', e.target.value)} className={inp(errors.address)} placeholder="123, Gandhi Nagar" disabled={isPaymentInProgress} />
               </Field>
               <Field label="City" error={errors.city}>
-                <input value={form.city} onChange={(e) => update('city', e.target.value)} className={inp(errors.city)} placeholder="Nagpur" />
+                <input value={form.city} onChange={(e) => update('city', e.target.value)} className={inp(errors.city)} placeholder="Nagpur" disabled={isPaymentInProgress} />
               </Field>
               <Field label="State" error={errors.state}>
-                <input value={form.state} onChange={(e) => update('state', e.target.value)} className={inp(errors.state)} placeholder="Maharashtra" />
+                <input value={form.state} onChange={(e) => update('state', e.target.value)} className={inp(errors.state)} placeholder="Maharashtra" disabled={isPaymentInProgress} />
               </Field>
               <Field label="Pincode" error={errors.pincode}>
-                <input type="tel" maxLength={6} value={form.pincode} onChange={(e) => update('pincode', e.target.value.replace(/\D/g, ''))} className={inp(errors.pincode)} placeholder="440001" />
+                <input type="tel" maxLength={6} value={form.pincode} onChange={(e) => update('pincode', e.target.value.replace(/\D/g, ''))} className={inp(errors.pincode)} placeholder="440001" disabled={isPaymentInProgress} />
               </Field>
             </div>
           </section>
 
+          {/* Payment Error Banner */}
+          {paymentError && paymentState === 'idle' && (
+            <div className="bg-red-50 border border-red-200 text-red-700 text-sm px-4 py-3 rounded-xl flex items-center gap-2">
+              <XCircle size={16} />
+              {paymentError}
+            </div>
+          )}
+
+          {/* Pay Now Button */}
           <button
             type="submit"
-            className="w-full bg-forest text-cream font-semibold py-4 rounded-full hover:bg-charcoal transition-colors text-sm tracking-widest uppercase"
+            disabled={isPaymentInProgress || items.length === 0}
+            className="w-full bg-forest text-cream font-semibold py-4 rounded-full hover:bg-charcoal transition-colors text-sm tracking-widest uppercase disabled:opacity-60 disabled:cursor-not-allowed flex items-center justify-center gap-2"
           >
-            Place Order — ₹{total.toLocaleString('en-IN')}
+            {isPaymentInProgress ? (
+              <>
+                <Loader2 size={18} className="animate-spin" />
+                {paymentState === 'creating' ? 'Creating Order…' : 'Processing Payment…'}
+              </>
+            ) : (
+              `Pay Now — ₹${total.toLocaleString('en-IN')}`
+            )}
           </button>
+
+          {/* Sandbox notice */}
+          <p className="text-center text-xs text-charcoal/40 -mt-4">
+            🔒 Payments are processed securely via Cashfree (Sandbox/Test Mode)
+          </p>
         </form>
 
         {/* Order Summary */}
@@ -227,5 +525,5 @@ function Field({ label, error, className = '', children }) {
 }
 
 function inp(error = '') {
-  return `w-full border ${error ? 'border-red-400' : 'border-black/15'} rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-forest transition-colors bg-[#FAFAF5]`;
+  return `w-full border ${error ? 'border-red-400' : 'border-black/15'} rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-forest transition-colors bg-[#FAFAF5] disabled:opacity-60 disabled:cursor-not-allowed`;
 }
