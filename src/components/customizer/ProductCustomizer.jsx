@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Palette, PenTool, Image as ImageIcon, Type, Check } from 'lucide-react';
+import { Palette, PenTool, Type, Check } from 'lucide-react';
 
 const ProductCustomizer = () => {
   const [activeTab, setActiveTab] = useState('base');

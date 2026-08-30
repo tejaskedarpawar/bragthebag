@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Check, ShoppingBag, Info } from 'lucide-react';
 import { BASE_BAGS, THREAD_COLORS, PATTERNS } from '../data/mockData';

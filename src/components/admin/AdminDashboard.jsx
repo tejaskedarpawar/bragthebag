@@ -1,4 +1,3 @@
-import React from 'react';
 import { BarChart3, Package, Settings, Users, ArrowUpRight } from 'lucide-react';
 
 const AdminDashboard = () => {

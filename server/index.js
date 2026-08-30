@@ -1,31 +1,9 @@
 import 'dotenv/config';
-import express from 'express';
-import cors from 'cors';
-import paymentRoutes from './routes/payment.js';
+import app from './app.js';
 
-const app = express();
 const PORT = process.env.PORT || 3001;
 
-// ─── Middleware ───────────────────────────────────────────────────────
-app.use(cors({
-  origin: ['http://localhost:5173', 'http://localhost:4173'],
-  credentials: true,
-}));
-app.use(express.json());
-
-// ─── Routes ───────────────────────────────────────────────────────────
-app.use('/api/payment/cashfree', paymentRoutes);
-
-// Health check
-app.get('/api/health', (req, res) => {
-  res.json({
-    status: 'ok',
-    environment: process.env.CASHFREE_ENVIRONMENT || 'sandbox',
-    timestamp: new Date().toISOString(),
-  });
-});
-
-// ─── Start ────────────────────────────────────────────────────────────
+// ─── Start Local Development Server ──────────────────────────────────
 app.listen(PORT, () => {
   console.log(`\n  🚀 BragTheBag API Server running on http://localhost:${PORT}`);
   console.log(`  📦 Cashfree Environment: ${process.env.CASHFREE_ENVIRONMENT || 'sandbox'}`);

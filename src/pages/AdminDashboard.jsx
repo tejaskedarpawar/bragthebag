@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   LayoutDashboard, Package, ImageIcon, LogOut,
-  TrendingUp, ShoppingBag, Users, DollarSign, CheckCircle2, Clock, Truck
+  TrendingUp, ShoppingBag, DollarSign, CheckCircle2, Clock, Truck
 } from 'lucide-react';
 import { useAuthStore } from '../store/useAuthStore';
 import { useBannerStore } from '../store/useBannerStore';

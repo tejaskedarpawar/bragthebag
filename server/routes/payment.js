@@ -36,6 +36,14 @@ router.post('/create-order', async (req, res) => {
   try {
     const { items, customer } = req.body;
 
+    // Check credentials early
+    if (!process.env.CASHFREE_APP_ID || !process.env.CASHFREE_SECRET_KEY) {
+      console.error('⚠️ Cashfree credentials missing: CASHFREE_APP_ID or CASHFREE_SECRET_KEY not set.');
+      return res.status(500).json({
+        error: 'Cashfree credentials not configured on the server. Please set CASHFREE_APP_ID and CASHFREE_SECRET_KEY in your Vercel Environment Variables.',
+      });
+    }
+
     // Validate required fields
     if (!items || !Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ error: 'Cart is empty' });
@@ -95,11 +103,11 @@ router.post('/create-order', async (req, res) => {
     console.log('========================================\n');
 
     const orderId = generateOrderId();
-    const returnUrl = `${
-      req.headers.origin ||
-      req.headers.referer?.replace(/\/checkout.*$/, '') ||
-      'http://localhost:5174'
-    }/checkout?order_id=${orderId}`;
+    const host = req.headers['x-forwarded-host'] || req.headers.host;
+    const proto = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
+    const detectedOrigin = host ? `${proto}://${host}` : null;
+    const origin = req.headers.origin || detectedOrigin || req.headers.referer?.replace(/\/checkout.*$/, '');
+    const returnUrl = `${origin || 'http://localhost:5173'}/checkout?order_id=${orderId}`;
 
     // Create order on Cashfree Sandbox
     const cfPayload = {
@@ -165,6 +173,13 @@ router.post('/create-order', async (req, res) => {
 router.post('/verify', async (req, res) => {
   try {
     const { order_id } = req.body;
+
+    if (!process.env.CASHFREE_APP_ID || !process.env.CASHFREE_SECRET_KEY) {
+      console.error('⚠️ Cashfree credentials missing: CASHFREE_APP_ID or CASHFREE_SECRET_KEY not set.');
+      return res.status(500).json({
+        error: 'Cashfree credentials not configured on the server. Please set CASHFREE_APP_ID and CASHFREE_SECRET_KEY in your Vercel Environment Variables.',
+      });
+    }
 
     if (!order_id) {
       return res.status(400).json({ error: 'order_id is required' });

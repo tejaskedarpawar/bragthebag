@@ -13,8 +13,16 @@ export default function Checkout() {
   const shipping = subtotal > 2999 ? 0 : 149;
   const total = subtotal + shipping;
 
-  const [form, setForm] = useState({
-    firstName: '', lastName: '', email: '', phone: '', address: '', city: '', state: '', pincode: '',
+  const [form, setForm] = useState(() => {
+    try {
+      const savedForm = sessionStorage.getItem('btb_checkout_form');
+      if (savedForm) return JSON.parse(savedForm);
+    } catch {
+      // ignore JSON parse errors
+    }
+    return {
+      firstName: '', lastName: '', email: '', phone: '', address: '', city: '', state: '', pincode: '',
+    };
   });
   const [otpState, setOtpState] = useState('idle'); // idle | loading | sent | verifying | verified
   const [otpValue, setOtpValue] = useState('');
@@ -68,11 +76,6 @@ export default function Checkout() {
   useEffect(() => {
     const returnOrderId = searchParams.get('order_id');
     if (returnOrderId && paymentState === 'idle') {
-      // Restore form data saved before the Cashfree redirect
-      const savedForm = sessionStorage.getItem('btb_checkout_form');
-      if (savedForm) {
-        try { setForm(JSON.parse(savedForm)); } catch {}
-      }
       verifyPayment(returnOrderId);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -171,7 +174,20 @@ export default function Checkout() {
       // Step 3: Initialize Cashfree SDK and redirect to hosted checkout
       setPaymentState('processing');
 
-      const cashfree = window.Cashfree({ mode: 'sandbox' });
+      if (typeof window.Cashfree !== 'function' && typeof window.Cashfree !== 'object') {
+        setPaymentState('failed');
+        setPaymentError('Cashfree SDK is not available. Please check your internet connection or disable ad-blockers and reload the page.');
+        return;
+      }
+
+      const cashfreeMode = import.meta.env.VITE_CASHFREE_MODE || 'sandbox';
+      const cashfree = window.Cashfree({ mode: cashfreeMode });
+
+      if (!cashfree || typeof cashfree.checkout !== 'function') {
+        setPaymentState('failed');
+        setPaymentError('Failed to initialize Cashfree checkout. Please try again.');
+        return;
+      }
 
       // Using '_self' redirect mode — Cashfree redirects to their hosted page,
       // then back to our return_url with order_id. This is more reliable than
@@ -186,7 +202,7 @@ export default function Checkout() {
     } catch (err) {
       console.error('Payment error:', err);
       setPaymentState('failed');
-      setPaymentError('An unexpected error occurred. Please try again.');
+      setPaymentError(err.message || 'An unexpected error occurred. Please try again.');
     }
   }
 

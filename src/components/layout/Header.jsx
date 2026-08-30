@@ -1,4 +1,3 @@
-import React from 'react';
 import { Search, Store, User, Heart, ShoppingBag } from 'lucide-react';
 
 const Header = () => {

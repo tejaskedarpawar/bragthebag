@@ -1,4 +1,3 @@
-import { Link } from 'react-router-dom';
 import { PRODUCTS, TRENDING_IDS } from '../data/mockData';
 import ProductCard from '../components/ui/ProductCard';
 import { TrendingUp } from 'lucide-react';

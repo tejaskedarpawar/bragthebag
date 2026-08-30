@@ -1,4 +1,4 @@
-import { MapPin, Users, Scissors, Heart, Award } from 'lucide-react';
+import { MapPin, Scissors, Heart, Award } from 'lucide-react';
 
 export default function About() {
   return (
